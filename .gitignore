@@ -147,3 +147,14 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# WOLVGUARD: workspace-only files and local credentials
+.local/
+.config/
+.sudo_as_admin_successful
+/uploads/
+
+# Generated browser captures and raw test output
+/tests/*.png
+/tests/*.tap
+/tests/*-results.json

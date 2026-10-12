@@ -1,0 +1,1 @@
+import {defineConfig} from 'vite';import react from '@vitejs/plugin-react';import tailwind from '@tailwindcss/vite';import {resolve} from 'node:path';export default defineConfig({plugins:[react(),tailwind()],resolve:{alias:{'@':resolve(__dirname,'.')}},server:{host:'0.0.0.0',allowedHosts:true,proxy:{'/api':'http://127.0.0.1:3001'}}});

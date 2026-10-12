@@ -1,0 +1,157 @@
+{
+  "generatedAt": "2026-10-12T22:41:11.154Z",
+  "unitTests": {
+    "total": 30,
+    "passed": 30,
+    "failed": 0
+  },
+  "buttonWiring": {
+    "controls": 98,
+    "unwired": [],
+    "scope": "Static button wiring only; behavior is covered separately by browser tests."
+  },
+  "browserWorkflows": {
+    "total": 31,
+    "passed": 31,
+    "live": [
+      {
+        "name": "Landing navigation, sign-in honesty and feature CTA",
+        "result": "PASS"
+      },
+      {
+        "name": "Brand form validation, logo upload and saved identity",
+        "result": "PASS"
+      },
+      {
+        "name": "Settings thresholds save, actual refresh and theme toggle",
+        "result": "PASS"
+      },
+      {
+        "name": "Real Bluesky scan and actual image signals",
+        "result": "PASS"
+      },
+      {
+        "name": "Pagination, search, severity, dates and reset",
+        "result": "PASS"
+      },
+      {
+        "name": "Real source links, notes, immutable review UI, evidence export",
+        "result": "PASS"
+      },
+      {
+        "name": "Bluesky handle/DID resolution and unverified official asset",
+        "result": "PASS"
+      },
+      {
+        "name": "Explicit verification instantly excludes exact official DID and clears current alerts",
+        "result": "PASS"
+      },
+      {
+        "name": "Verification revocation and re-verification",
+        "result": "PASS"
+      },
+      {
+        "name": "Real Apple scan with separate source state and computed image signals",
+        "result": "PASS"
+      },
+      {
+        "name": "Register and verify exact official Apple ID without hiding other apps",
+        "result": "PASS"
+      },
+      {
+        "name": "Scan detail export includes original candidate snapshots",
+        "result": "PASS"
+      },
+      {
+        "name": "Notifications mark-all-read",
+        "result": "PASS"
+      },
+      {
+        "name": "Workspace export and retention controls",
+        "result": "PASS"
+      },
+      {
+        "name": "Brand edit, archive and restore",
+        "result": "PASS"
+      },
+      {
+        "name": "Nine rubric validation actions and presentation links",
+        "result": "PASS"
+      },
+      {
+        "name": "Failure fixture does not create synthetic candidates",
+        "result": "PASS"
+      },
+      {
+        "name": "Cancel scan makes a failed/cancelled record, not a completed scan",
+        "result": "PASS"
+      },
+      {
+        "name": "Reload persistence, mode separation and mobile controls",
+        "result": "PASS"
+      },
+      {
+        "name": "Global search and sidebar collapse/expand",
+        "result": "PASS"
+      },
+      {
+        "name": "Desktop visual check and no runtime exceptions",
+        "result": "PASS"
+      },
+      {
+        "name": "Asset removal recalculates official exclusion",
+        "result": "PASS"
+      },
+      {
+        "name": "Clear live workspace deletes live data only",
+        "result": "PASS"
+      }
+    ],
+    "demo": [
+      {
+        "name": "Hero, features and platform capability actions",
+        "result": "PASS"
+      },
+      {
+        "name": "Support draft export and about dialog",
+        "result": "PASS"
+      },
+      {
+        "name": "Interactive demo preview and demo-only scan action",
+        "result": "PASS"
+      },
+      {
+        "name": "Demo candidate details, status confirmation, notes and review history",
+        "result": "PASS"
+      },
+      {
+        "name": "Demo user menu, authentication disclosure, theme and notifications",
+        "result": "PASS"
+      },
+      {
+        "name": "Demo preferences save/reload and working live-connection guide",
+        "result": "PASS"
+      },
+      {
+        "name": "Demo help guide actually answers submitted questions",
+        "result": "PASS"
+      },
+      {
+        "name": "Demo reset, collapse/expand and website return",
+        "result": "PASS"
+      }
+    ],
+    "runtimeErrors": []
+  },
+  "actualProvidersExercised": [
+    "Apple App Store Search",
+    "Bluesky public AppView actor search and profile resolution"
+  ],
+  "imageComparison": "Real provider images fetched and fingerprinted; missing-image and SSRF restrictions tested.",
+  "additionalChecks": [
+    "Desktop and 390px mobile layouts",
+    "No-WebGL fallback",
+    "Nine labelled synthetic rubric fixtures (included in unit total)"
+  ],
+  "limitations": "Tests establish the checked behavior, not defect-free software, full-platform coverage, real-world fraud precision or a guaranteed judge score. Manual verification and forced failure cases in the test browser are labelled fixtures."
+}
