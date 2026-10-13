@@ -300,7 +300,7 @@ export async function searchAppleAds(params, fetcher = fetch) {
 }
 
 export async function searchYouTube(params, fetcher = fetch) {
-  const key = process.env.YOUTUBE_API_KEY;
+  const key = process.env.YOUTUBE_API_KEY?.trim();
   if (!key) {
     throw new ProviderError("NOT_CONFIGURED", "YouTube API credentials are not configured on the server.", 503);
   }

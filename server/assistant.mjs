@@ -34,11 +34,11 @@ export function validateChatRequest(body) {
 
 export async function generateAssistantResponse(body, fetcher = fetch) {
   const { messages, context } = validateChatRequest(body);
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) {
     throw new ProviderError("NOT_CONFIGURED", "The assistant is not configured on the server.", 503);
   }
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const model = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash";
   if (!/^[a-zA-Z0-9._-]{1,80}$/.test(model)) {
     throw new ProviderError("MODEL_CONFIG", "The assistant model configuration is invalid.", 503);
   }

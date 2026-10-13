@@ -25,6 +25,17 @@ npm start
 * **API Health**: [http://localhost:5173/api/providers](http://localhost:5173/api/providers)
 * **Development Mode**: `npm run dev:api` (Port 3001) + `npm run dev` (Port 5173)
 
+### 🌐 Deploying to Vercel
+1. Push this repository to GitHub.
+2. In Vercel, import the repository (Framework Preset: **Vite**).
+3. Set the Environment Variables in Vercel Settings -> Environment Variables:
+   * `VITE_SUPABASE_URL`
+   * `VITE_SUPABASE_PUBLISHABLE_KEY`
+   * `YOUTUBE_API_KEY`
+   * `GEMINI_API_KEY`
+   * `GEMINI_MODEL` (Optional, leave blank or set to `gemini-2.5-flash`)
+4. Deploy! Vercel automatically serves the frontend static build from `dist/` and runs all `/api/*` endpoints (YouTube scan, Gemini chat assistant, provider health) via Vercel Serverless Functions in `api/`.
+
 ---
 
 ## 📌 Executive Summary: What We Have Built & Current Status
