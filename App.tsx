@@ -31,6 +31,7 @@ import {
   Activity,
   LockKeyhole,
   Mail,
+  EyeOff,
   MessageSquare,
   Send,
   Play,
@@ -158,6 +159,8 @@ export default function App() {
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authConfirmPassword, setAuthConfirmPassword] = useState("");
+  const [showAuthPassword, setShowAuthPassword] = useState(false);
+  const [showAuthConfirmPassword, setShowAuthConfirmPassword] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [authCooldown, setAuthCooldown] = useState(0);
   useEffect(() => {
@@ -192,6 +195,12 @@ export default function App() {
       subscription.unsubscribe();
     };
   }, []);
+  function goToAuth(mode: "login" | "signup") {
+    setAuthMode(mode);
+    setRoute("login");
+    if (location.hash !== "#login") location.hash = "login";
+    window.scrollTo(0, 0);
+  }
   useEffect(() => {
     if (!hasSupabaseConfig || !authReady) return;
     if (route === "live" && !authSession) location.hash = "login";
@@ -871,10 +880,17 @@ export default function App() {
               </a>
             </nav>
             <div>
-              <a href="#login" className="signin-link">
+              <a
+                href="#login"
+                className="signin-link"
+                onClick={(e) => {
+                  e.preventDefault();
+                  goToAuth("login");
+                }}
+              >
                 Sign in <ArrowUpRight size={13} />
               </a>
-              <Button onClick={openDashboard}>
+              <Button onClick={() => goToAuth("signup")}>
                 Get started <ArrowRight size={15} />
               </Button>
             </div>
@@ -1215,27 +1231,49 @@ export default function App() {
                     aria-label="Work email"
                     required
                   />
-                  <input
-                    type="password"
-                    autoComplete={authMode === "signup" ? "new-password" : "current-password"}
-                    value={authPassword}
-                    onChange={(e) => setAuthPassword(e.target.value)}
-                    placeholder="Password"
-                    aria-label="Password"
-                    minLength={authMode === "signup" ? 8 : undefined}
-                    required
-                  />
-                  {authMode === "signup" && (
+                  <div className="auth-password-field">
                     <input
-                      type="password"
-                      autoComplete="new-password"
-                      value={authConfirmPassword}
-                      onChange={(e) => setAuthConfirmPassword(e.target.value)}
-                      placeholder="Confirm password"
-                      aria-label="Confirm password"
-                      minLength={8}
+                      type={showAuthPassword ? "text" : "password"}
+                      autoComplete={authMode === "signup" ? "new-password" : "current-password"}
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      placeholder="Password"
+                      aria-label="Password"
+                      minLength={authMode === "signup" ? 8 : undefined}
                       required
                     />
+                    <button
+                      className="auth-password-toggle"
+                      type="button"
+                      aria-label={showAuthPassword ? "Hide password" : "Show password"}
+                      aria-pressed={showAuthPassword}
+                      onClick={() => setShowAuthPassword((visible) => !visible)}
+                    >
+                      {showAuthPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+                  {authMode === "signup" && (
+                    <div className="auth-password-field">
+                      <input
+                        type={showAuthConfirmPassword ? "text" : "password"}
+                        autoComplete="new-password"
+                        value={authConfirmPassword}
+                        onChange={(e) => setAuthConfirmPassword(e.target.value)}
+                        placeholder="Confirm password"
+                        aria-label="Confirm password"
+                        minLength={8}
+                        required
+                      />
+                      <button
+                        className="auth-password-toggle"
+                        type="button"
+                        aria-label={showAuthConfirmPassword ? "Hide confirm password" : "Show confirm password"}
+                        aria-pressed={showAuthConfirmPassword}
+                        onClick={() => setShowAuthConfirmPassword((visible) => !visible)}
+                      >
+                        {showAuthConfirmPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                      </button>
+                    </div>
                   )}
                   <Button
                     type="submit"

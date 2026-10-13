@@ -48,6 +48,10 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { scoreCandidate } from "@/lib/live-detection";
+import {
+  downloadEvidenceReport,
+  downloadScanReport,
+} from "@/lib/scan-report";
 import { uploadSignature } from "@/lib/image-signature";
 import {
   hasSupabaseConfig,
@@ -1170,18 +1174,6 @@ export default function LiveWorkspace({
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="demo-info">
-            <ShieldCheck size={22} />
-            <b>Real sources. Clear boundaries.</b>
-            <p>
-              Live YouTube & app results.
-              <br />
-              No simulated intelligence.
-            </p>
-            <button onClick={startScan}>
-              Start a live search <ArrowUpRight size={13} />
-            </button>
-          </div>
           {hasSupabaseConfig && (
             <button
               className="auth-signout"
@@ -2670,21 +2662,24 @@ export default function LiveWorkspace({
           <Button
             className="evidence-export"
             variant="outline"
-            onClick={() =>
-              download(
-                {
-                  dataMode: "live",
-                  source:
-                    `${providerLabel(selected.provider)} search`,
-                  candidate: selected,
-                  brand: state.brands.find((b) => b.id === selected.brandId),
-                },
-                `wolvguard-evidence-${selected.sourceId}.json`,
-              )
-            }
+            onClick={() => {
+              try {
+                downloadEvidenceReport(
+                  selected,
+                  state.brands.find((brand) => brand.id === selected.brandId),
+                  state.scans.find((item) => item.id === selected.scanId),
+                );
+              } catch (error) {
+                setToast(
+                  error instanceof Error
+                    ? `Could not generate the evidence report: ${error.message}`
+                    : "Could not generate the evidence report. Try exporting again.",
+                );
+              }
+            }}
           >
             <ArrowDownToLine size={15} />
-            Export evidence & reviews
+            Download evidence report (PDF)
           </Button>
         </Dialog>
       )}
@@ -2735,10 +2730,20 @@ export default function LiveWorkspace({
           </p>
           <Button
             variant="outline"
-            onClick={() => download(scan, `wolvguard-scan-${scan.id}.json`)}
+            onClick={() => {
+              try {
+                downloadScanReport(scan);
+              } catch (error) {
+                setToast(
+                  error instanceof Error
+                    ? `Could not generate the scan report: ${error.message}`
+                    : "Could not generate the scan report. Try exporting again.",
+                );
+              }
+            }}
           >
             <ArrowDownToLine size={14} />
-            Export scan record
+            Download scan report (PDF)
           </Button>
         </Dialog>
       )}
