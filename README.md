@@ -21,8 +21,7 @@ npm run build
 npm start
 ```
 
-* **Live App**: [http://localhost:5173](http://localhost:5173)
-* **API Health**: [http://localhost:5173/api/providers](http://localhost:5173/api/providers)
+* **Live App**: [https://wolvguard.vercel.app](https://wolvguard.vercel.app)
 * **Development Mode**: `npm run dev:api` (Port 3001) + `npm run dev` (Port 5173)
 
 ### 🌐 Deploying to Vercel
