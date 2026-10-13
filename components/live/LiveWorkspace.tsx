@@ -27,7 +27,9 @@ import {
   LayoutDashboard,
   Loader2,
   LockKeyhole,
+  LogOut,
   Menu,
+  MessageSquare,
   Plus,
   Radio,
   RefreshCw,
@@ -36,6 +38,7 @@ import {
   Settings,
   Shield,
   ShieldCheck,
+  Send,
   SlidersHorizontal,
   Smartphone,
   Trash2,
@@ -46,7 +49,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { scoreCandidate } from "@/lib/live-detection";
 import { uploadSignature } from "@/lib/image-signature";
-import Evaluation from "./Evaluation";
+import {
+  hasSupabaseConfig,
+  loadWorkspaceFromSupabase,
+  saveWorkspaceToSupabase,
+  signOut,
+} from "@/lib/supabase";
 import type {
   Asset,
   LiveBrand,
@@ -70,13 +78,12 @@ const INITIAL: LiveState = {
 const sections = [
   ["Overview", LayoutDashboard],
   ["Brand Profiles", Building2],
-  ["Social Monitoring", Globe],
+  ["YouTube Monitoring", Youtube],
   ["App Monitoring", Smartphone],
   ["Findings & Investigations", FileSearch],
   ["Scan History", History],
   ["Notifications", Bell],
   ["Settings", Settings],
-  ["Demo & Evaluation", Activity],
 ] as const;
 const statuses: ReviewStatus[] = [
   "Needs Review",
@@ -84,6 +91,7 @@ const statuses: ReviewStatus[] = [
   "Confirmed Impersonation",
   "Dismissed",
 ];
+type AssistantMessage = { role: "user" | "assistant"; text: string };
 const regions = {
   us: "United States",
   in: "India",
@@ -212,7 +220,7 @@ function Dialog({
         >
           <X size={20} />
         </button>
-        <div className="eyebrow">WOLVGUARD / LOCAL LIVE WORKSPACE</div>
+        <div className="eyebrow">WOLVGUARD / LIVE WORKSPACE</div>
         <h2>{title}</h2>
         {children}
       </section>
@@ -236,18 +244,42 @@ function validHttps(value: string) {
     return false;
   }
 }
-export default function LiveWorkspace() {
-  const [state, setState] = useState<LiveState>(loadState);
-  const [page, setPage] = useState(
-    () => sessionStorage.getItem("wg-live-page") || "Overview",
+function providerLabel(provider?: Asset["provider"] | LiveCandidate["provider"] | Scan["provider"]) {
+  if (provider === "youtube") return "YouTube";
+  if (provider === "bluesky") return "Legacy Bluesky";
+  return "Apple Ads";
+}
+export default function LiveWorkspace({
+  userId,
+}: {
+  userId: string | null;
+}) {
+  const [state, setState] = useState<LiveState>(() =>
+    hasSupabaseConfig ? structuredClone(INITIAL) : loadState(),
   );
-  const [scanProvider, setScanProvider] = useState<"apple" | "bluesky">(
+  const [workspaceReady, setWorkspaceReady] = useState(!hasSupabaseConfig);
+  const [workspaceLoadError, setWorkspaceLoadError] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [loadRetry, setLoadRetry] = useState(0);
+  const [saveRetry, setSaveRetry] = useState(0);
+  const [signOutBusy, setSignOutBusy] = useState(false);
+  const persistedState = useRef<LiveState>(structuredClone(INITIAL));
+  const saveQueue = useRef<Promise<void>>(Promise.resolve());
+  const [page, setPage] = useState(
+    () => {
+      const savedPage = sessionStorage.getItem("wg-live-page");
+      if (savedPage === "Social Monitoring") return "YouTube Monitoring";
+      if (savedPage === "Demo & Evaluation") return "Overview";
+      return savedPage || "Overview";
+    },
+  );
+  const [scanProvider, setScanProvider] = useState<"apple" | "youtube">(
     "apple",
   );
   const [logoDraft, setLogoDraft] = useState<LiveBrand["logo"]>();
   const [imageBusy, setImageBusy] = useState(false);
   const [assetBusy, setAssetBusy] = useState(false);
-  const [assetProvider, setAssetProvider] = useState<"apple" | "bluesky">(
+  const [assetProvider, setAssetProvider] = useState<"apple" | "youtube">(
     "apple",
   );
   const controller = useRef<AbortController | null>(null);
@@ -267,6 +299,11 @@ export default function LiveWorkspace() {
   const [scanDetail, setScanDetail] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [mobileMenu, setMobileMenu] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantBusy, setAssistantBusy] = useState(false);
+  const [assistantDraft, setAssistantDraft] = useState("");
+  const [assistantError, setAssistantError] = useState("");
+  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
   const [collapsed, setCollapsed] = useState(false);
   const [query, setQuery] = useState("");
   const [brandFilter, setBrandFilter] = useState("all");
@@ -302,6 +339,7 @@ export default function LiveWorkspace() {
   }
 
   useEffect(() => {
+    if (hasSupabaseConfig) return;
     try {
       localStorage.setItem(STORAGE, JSON.stringify(state));
       setStorageError("");
@@ -329,9 +367,120 @@ export default function LiveWorkspace() {
       );
     }
   }
+  async function handleSignOut() {
+    if (signOutBusy) return;
+    setSignOutBusy(true);
+    try {
+      await signOut();
+      location.hash = "login";
+    } catch {
+      setToast("Could not sign out. Check your connection and try again.");
+    } finally {
+      setSignOutBusy(false);
+    }
+  }
+  async function askAssistant(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const text = assistantDraft.trim();
+    if (!text || assistantBusy) return;
+    setAssistantBusy(true);
+    setAssistantError("");
+    const recent = assistantMessages.slice(-8).map((message) => ({
+      role: message.role === "assistant" ? "model" : "user",
+      text: message.text,
+    }));
+    const context = JSON.stringify({
+      brands: state.brands.slice(0, 30).map((brand) => ({ id: brand.id, name: brand.name })),
+      candidates: state.candidates.filter((candidate) => candidate.potential).slice(0, 20).map((candidate) => ({
+        name: candidate.name,
+        brand: state.brands.find((brand) => brand.id === candidate.brandId)?.name ?? "",
+        source: candidate.provider ?? "apple",
+        score: candidate.score,
+        severity: candidate.severity,
+        status: candidate.status,
+      })),
+      counts: {
+        scans: state.scans.length,
+        candidates: state.candidates.length,
+        potentialMatches: potential.length,
+      },
+    });
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [...recent, { role: "user", text }],
+          context,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error?.message || "The assistant could not answer.");
+      if (typeof result.answer !== "string" || !result.answer.trim()) {
+        throw new Error("The assistant returned an empty answer. Try again.");
+      }
+      setAssistantMessages((messages): AssistantMessage[] => [
+        ...messages,
+        { role: "user" as const, text },
+        { role: "assistant" as const, text: String(result.answer) },
+      ].slice(-16));
+      setAssistantDraft("");
+    } catch (error) {
+      setAssistantError(error instanceof Error ? error.message : "The assistant is unavailable. Try again.");
+    } finally {
+      setAssistantBusy(false);
+    }
+  }
   useEffect(() => {
     refreshStatus();
   }, []);
+  useEffect(() => {
+    if (!hasSupabaseConfig) return;
+    let ignore = false;
+    if (!userId) return;
+    setWorkspaceReady(false);
+    setWorkspaceLoadError(false);
+    (async () => {
+      try {
+        const workspace = await loadWorkspaceFromSupabase(userId);
+        if (!ignore) {
+          persistedState.current = structuredClone(workspace);
+          setState(workspace);
+          setWorkspaceReady(true);
+        }
+      } catch {
+        if (!ignore) {
+          setWorkspaceLoadError(true);
+          setStorageError("Could not load your saved workspace. Retry before making changes.");
+        }
+      }
+    })();
+    return () => {
+      ignore = true;
+    };
+  }, [userId, loadRetry]);
+  useEffect(() => {
+    if (!hasSupabaseConfig || !userId || !workspaceReady || workspaceLoadError) return;
+    const snapshot = structuredClone(state);
+    const timer = window.setTimeout(() => {
+      saveQueue.current = saveQueue.current
+        .catch(() => undefined)
+        .then(async () => {
+          const previous = persistedState.current;
+          if (JSON.stringify(snapshot) === JSON.stringify(previous)) return;
+          setSyncStatus("saving");
+          await saveWorkspaceToSupabase(userId, snapshot, previous);
+          persistedState.current = snapshot;
+          setSyncStatus("saved");
+          setStorageError("");
+        })
+        .catch(() => {
+          setSyncStatus("error");
+          setStorageError("Could not save your workspace to Supabase. Retry to save your latest changes.");
+        });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [state, userId, workspaceReady, workspaceLoadError, saveRetry]);
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
@@ -344,8 +493,9 @@ export default function LiveWorkspace() {
     document.addEventListener("keydown", key);
     return () => document.removeEventListener("keydown", key);
   }, []);
-  // Local retention is applied when the workspace is opened, never on a remote company database.
+  // Browser-only retention applies only to the unauthenticated fallback.
   useEffect(() => {
+    if (!workspaceReady) return;
     setState((s) => {
       const cutoff = Date.now() - s.prefs.retention * 86400000;
       const candidates = s.candidates.filter(
@@ -359,7 +509,7 @@ export default function LiveWorkspace() {
         alerts: s.alerts.filter((a) => ids.has(a.candidateId)),
       };
     });
-  }, []);
+  }, [workspaceReady]);
   function navigate(next: string) {
     setPage(next);
     setSourceFilter("all");
@@ -368,7 +518,7 @@ export default function LiveWorkspace() {
     setMobileMenu(false);
   }
   function startScan() {
-    setScanProvider(page === "Social Monitoring" ? "bluesky" : "apple");
+    setScanProvider(page === "YouTube Monitoring" ? "youtube" : "apple");
     if (!activeBrands.length) {
       setEditId(null);
       setModal("brand");
@@ -377,8 +527,8 @@ export default function LiveWorkspace() {
   const filtered = state.candidates
     .filter(
       (c) =>
-        (page !== "Social Monitoring" ||
-          (c.provider || "apple") === "bluesky") &&
+        (page !== "YouTube Monitoring" ||
+          (c.provider || "apple") === "youtube") &&
         (page !== "App Monitoring" || (c.provider || "apple") === "apple") &&
         (page !== "Findings & Investigations" ||
           (c.potential && !c.official)) &&
@@ -431,7 +581,9 @@ export default function LiveWorkspace() {
     }));
     setModal("");
     setToast(
-      "Brand saved only in this browser. Run a scan to calculate fresh comparisons.",
+      hasSupabaseConfig
+        ? "Brand changes queued for your account. Run a scan to calculate fresh comparisons."
+        : "Brand saved only in this browser. Run a scan to calculate fresh comparisons.",
     );
     navigate("Brand Profiles");
   }
@@ -441,8 +593,7 @@ export default function LiveWorkspace() {
     const data = new FormData(e.currentTarget);
     const brand = state.brands.find((b) => b.id === data.get("brand"));
     if (!brand || brand.archived) return;
-    const country =
-      scanProvider === "bluesky" ? "us" : String(data.get("country"));
+    const country = String(data.get("country"));
     controller.current = new AbortController();
     const signal = AbortSignal.any([
       controller.current.signal,
@@ -455,7 +606,7 @@ export default function LiveWorkspace() {
       id,
       brandId: brand.id,
       brandName: brand.name,
-      country:scanProvider==='bluesky'?'global':country,
+      country,
       startedAt,
       completedAt: null,
       fetchedAt: null,
@@ -542,7 +693,13 @@ export default function LiveWorkspace() {
       const scored: LiveCandidate[] = raw.map((c: ProviderCandidate) => ({
         ...c,
         ...scoreCandidate(brand, c, state.prefs.thresholds),
-        id: `${brand.id}:${scanProvider === "bluesky" ? "global" : country}:${c.sourceId}`,
+        id:
+          state.candidates.find(
+            (existing) =>
+              existing.brandId === brand.id &&
+              (existing.provider || "apple") === scanProvider &&
+              existing.sourceId === c.sourceId,
+          )?.id ?? crypto.randomUUID(),
         brandId: brand.id,
         scanId: id,
         fetchedAt: result.fetchedAt,
@@ -603,10 +760,10 @@ export default function LiveWorkspace() {
         };
       });
       setToast(
-        `${scored.length} real ${scanProvider === "bluesky" ? "Bluesky profiles" : "App Store listings"} received. ${scored.filter((c) => c.potential).length} potential matches need context, not assumptions.`,
+        `${scored.length} real ${scanProvider === "youtube" ? "YouTube channels" : "App Store listings"} received. ${scored.filter((c) => c.potential).length} potential matches need context, not assumptions.`,
       );
       navigate(
-        scanProvider === "bluesky" ? "Social Monitoring" : "App Monitoring",
+        scanProvider === "youtube" ? "YouTube Monitoring" : "App Monitoring",
       );
     } catch (error) {
       const message =
@@ -651,7 +808,7 @@ export default function LiveWorkspace() {
     if (
       status === "Confirmed Impersonation" &&
       !confirm(
-        "This is a serious manual classification. Have you independently verified impersonation beyond name or publisher similarity? Your decision is a local note, not an automated report.",
+        "This is a serious manual classification. Have you independently verified impersonation beyond name or publisher similarity? This is a human review, not an automated report.",
       )
     )
       return;
@@ -677,7 +834,11 @@ export default function LiveWorkspace() {
           : c,
       ),
     }));
-    setToast("Review recorded locally. No account was reported or removed.");
+    setToast(
+      hasSupabaseConfig
+        ? "Review queued for your account. No account was reported or removed."
+        : "Review recorded locally. No account was reported or removed.",
+    );
     (e.currentTarget.elements.namedItem("note") as HTMLTextAreaElement).value =
       "";
   }
@@ -708,24 +869,11 @@ export default function LiveWorkspace() {
           );
         sourceId = match[1];
       } else {
-        if (u.hostname !== "bsky.app" || !u.pathname.startsWith("/profile/"))
-          throw new Error("Use https://bsky.app/profile/handle-or-did");
-        const actor = decodeURIComponent(
-          u.pathname.split("/profile/")[1].split("/")[0],
-        );
-        const r = await fetch("/api/bluesky/resolve", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ actor }),
-        });
-        const profile = await r.json();
-        if (!r.ok)
-          throw new Error(
-            profile.error?.message || "Profile resolution failed.",
-          );
-        sourceId = profile.did;
-        publisher = profile.handle;
-        officialUrl = profile.url;
+        const match = u.pathname.match(/^\/channel\/(UC[A-Za-z0-9_-]{20,30})\/?$/);
+        if (!["youtube.com", "www.youtube.com"].includes(u.hostname) || !match)
+          throw new Error("Use a canonical YouTube channel URL: youtube.com/channel/UC…");
+        sourceId = match[1];
+        officialUrl = `https://www.youtube.com/channel/${sourceId}`;
       }
       if (
         editing.assets.some(
@@ -904,7 +1052,7 @@ export default function LiveWorkspace() {
                         : "Search candidate"}
                   </Tag>
                   <small className="block-small">
-                    {c.provider === "bluesky" ? "Bluesky API" : "Apple API"} ·{" "}
+                    {providerLabel(c.provider)} API ·{" "}
                     {c.metadata.region}
                   </small>
                 </td>
@@ -960,6 +1108,24 @@ export default function LiveWorkspace() {
       .reduce((n, s) => n + s.matches, 0),
   );
   const chartMax = Math.max(1, ...dayCounts);
+  if (hasSupabaseConfig && !workspaceReady) {
+    return (
+      <div className="workspace-loading" role="status">
+        <ShieldCheck size={38} />
+        <h2>{workspaceLoadError ? "Workspace could not be loaded" : "Loading your workspace"}</h2>
+        <p>
+          {workspaceLoadError
+            ? "Your cloud data was not changed. Retry when your connection is available."
+            : "Loading your account’s saved brands and findings…"}
+        </p>
+        {workspaceLoadError && (
+          <Button variant="outline" onClick={() => setLoadRetry((value) => value + 1)}>
+            Retry
+          </Button>
+        )}
+      </div>
+    );
+  }
   return (
     <div
       className={`site live-site app-shell ${light ? "light" : ""} ${collapsed ? "collapsed" : ""} ${mobileMenu ? "live-mobile-open" : ""}`}
@@ -984,8 +1150,8 @@ export default function LiveWorkspace() {
             <Radio size={14} />
           </span>
           <div>
-            <b>Local live workspace</b>
-            <small>This browser only</small>
+            <b>{hasSupabaseConfig ? "Account workspace" : "Local live workspace"}</b>
+            <small>{hasSupabaseConfig ? "Synced to your account" : "This browser only"}</small>
           </div>
         </div>
         <div className="nav-label">PUBLIC SOURCE MONITORING</div>
@@ -1008,7 +1174,7 @@ export default function LiveWorkspace() {
             <ShieldCheck size={22} />
             <b>Real sources. Clear boundaries.</b>
             <p>
-              Live social & app results.
+              Live YouTube & app results.
               <br />
               No simulated intelligence.
             </p>
@@ -1016,6 +1182,16 @@ export default function LiveWorkspace() {
               Start a live search <ArrowUpRight size={13} />
             </button>
           </div>
+          {hasSupabaseConfig && (
+            <button
+              className="auth-signout"
+              onClick={handleSignOut}
+              disabled={signOutBusy}
+            >
+              <LogOut size={16} />
+              <span>{signOutBusy ? "Signing out…" : "Sign out"}</span>
+            </button>
+          )}
           <button
             className="collapse-button"
             onClick={() => setCollapsed(!collapsed)}
@@ -1023,10 +1199,6 @@ export default function LiveWorkspace() {
             <Menu size={17} />
             <span>Collapse sidebar</span>
           </button>
-          <a href="#app">
-            <Layers size={16} />
-            <span>Switch to Demo Mode</span>
-          </a>
         </div>
       </aside>
       <div className="app-main">
@@ -1063,10 +1235,6 @@ export default function LiveWorkspace() {
             >
               <Activity size={17} />
             </button>
-            <a href="#app" className="mode-switch">
-              <Layers size={14} />
-              Demo mode
-            </a>
             <button
               aria-label="Notifications"
               className="notification-button"
@@ -1077,7 +1245,7 @@ export default function LiveWorkspace() {
             </button>
             <button
               className="user-avatar"
-              aria-label="Local storage and privacy settings"
+              aria-label="Workspace and privacy settings"
               onClick={() => navigate("Settings")}
             >
               L
@@ -1089,7 +1257,15 @@ export default function LiveWorkspace() {
             <Radio size={13} />
             <b>Live public API results · Not verified threats</b>
             <span className="demo-extra">
-              Local browser storage · Not signed in
+              {hasSupabaseConfig
+                ? syncStatus === "saving"
+                  ? "Saving to Supabase…"
+                  : syncStatus === "error"
+                    ? "Cloud save failed"
+                    : syncStatus === "saved"
+                      ? "Saved to your account"
+                      : "Account data · Private workspace"
+                : "Local browser storage · Not signed in"}
             </span>
           </span>
           <button onClick={() => navigate("Settings")}>
@@ -1100,12 +1276,18 @@ export default function LiveWorkspace() {
           <div className="notice storage-warning" role="alert">
             <TriangleAlert size={18} />
             {storageError}
-            <Button
-              variant="outline"
-              onClick={() => download(state, "wolvguard-live-workspace.json")}
-            >
-              Export now
-            </Button>
+            {hasSupabaseConfig ? (
+              <Button variant="outline" onClick={() => setSaveRetry((value) => value + 1)}>
+                Retry save
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                onClick={() => download(state, "wolvguard-live-workspace.json")}
+              >
+                Export now
+              </Button>
+            )}
           </div>
         )}
         <main className="app-content">
@@ -1125,23 +1307,23 @@ export default function LiveWorkspace() {
                   (
                     {
                       Overview:
-                        "Real App Store evidence, kept separate from the demonstration workspace.",
+                        "Real source evidence and review leads from your workspace.",
                       "Brand Profiles":
                         "Register brand assets, upload a reference logo, and verify official identities.",
                       "App Monitoring":
                         "Search Apple’s public catalog. Compare evidence. Stay in control.",
-                      "Social Monitoring":
-                        "Search real Bluesky profiles with name, description, account and optional logo signals.",
+                      "YouTube Monitoring":
+                        "Search real YouTube channels with name, description, and optional logo signals.",
                       "Findings & Investigations":
                         "Potential matches are review leads—not conclusions about fraud.",
                       "Scan History":
                         "Every live search, including failures and empty results.",
                       Notifications:
-                        "Local in-app alerts. No emails have been sent.",
-                      "Demo & Evaluation":
-                        "A traceable rubric audit and a short, honest presentation for judges.",
+                        "In-app alerts for review leads. No email notifications are sent.",
+                      "System Status":
+                        "Provider availability and recent integration activity.",
                       Settings:
-                        "Supported services, local data controls, and honest integration status.",
+                        "Connected services, account data controls, and integration status.",
                     } as Record<string, string>
                   )[page]
                 }
@@ -1169,7 +1351,7 @@ export default function LiveWorkspace() {
               ) : [
                   "Overview",
                   "App Monitoring",
-                  "Social Monitoring",
+                  "YouTube Monitoring",
                   "Findings & Investigations",
                   "Scan History",
                 ].includes(page) ? (
@@ -1192,7 +1374,7 @@ export default function LiveWorkspace() {
                     Building2,
                     "Registered brands",
                     activeBrands.length,
-                    "Local identity profiles",
+                    hasSupabaseConfig ? "Account identity profiles" : "Local identity profiles",
                   ],
                   [
                     Smartphone,
@@ -1309,11 +1491,11 @@ export default function LiveWorkspace() {
                 <h3>Social versus app findings</h3>
                 <Tag>Current unverified leads</Tag>
               </div>
-              {(["bluesky", "apple"] as const).map((p) => (
+              {(["youtube", "apple"] as const).map((p) => (
                 <div className="source-bar" key={p}>
                   <span>
-                    {p === "bluesky"
-                      ? "Bluesky social profiles"
+                    {p === "youtube"
+                      ? "YouTube channels"
                       : "Apple app listings"}
                     <b>
                       {
@@ -1365,7 +1547,7 @@ export default function LiveWorkspace() {
                       <div className="brand-card-top">
                         <span className="large-avatar">{b.name[0]}</span>
                         <Tag tone={b.archived ? "" : "green"}>
-                          {b.archived ? "Archived" : "Local brand"}
+                          {b.archived ? "Archived" : hasSupabaseConfig ? "Account brand" : "Local brand"}
                         </Tag>
                       </div>
                       <h3>{b.name}</h3>
@@ -1441,7 +1623,7 @@ export default function LiveWorkspace() {
           ) : null}
           {[
             "App Monitoring",
-            "Social Monitoring",
+            "YouTube Monitoring",
             "Findings & Investigations",
           ].includes(page) ? (
             <>
@@ -1451,24 +1633,24 @@ export default function LiveWorkspace() {
                 </span>
                 <div>
                   <b>
-                    {page === "Social Monitoring"
-                      ? "Bluesky public profile search"
+                    {page === "YouTube Monitoring"
+                      ? "YouTube public channel search"
                       : page === "Findings & Investigations"
                         ? "Cross-source investigations"
                         : "Apple App Store Search"}
                   </b>
                   <p>
-                    {page === "Social Monitoring"
-                      ? "Global public profiles · stable DIDs · up to 25 results"
+                    {page === "YouTube Monitoring"
+                      ? "Public channels · up to 25 results · YouTube API quota applies"
                       : "Public app catalog · 8 regions · up to 25 results"}{" "}
-                    · No API key required
+                    · Server-side credentials
                   </p>
                 </div>
                 <Tag
                   tone={
                     !providerError &&
-                    (page === "Social Monitoring"
-                      ? provider?.bluesky
+                    (page === "YouTube Monitoring"
+                      ? provider?.youtube
                       : provider?.apple
                     )?.status === "Connected"
                       ? "green"
@@ -1477,8 +1659,8 @@ export default function LiveWorkspace() {
                 >
                   {providerError
                     ? "Error"
-                    : (page === "Social Monitoring"
-                        ? provider?.bluesky
+                    : (page === "YouTube Monitoring"
+                      ? provider?.youtube
                         : provider?.apple
                       )?.status || "Checking…"}
                 </Tag>
@@ -1502,12 +1684,12 @@ export default function LiveWorkspace() {
                     <Search size={15} />
                     <input
                       aria-label="Search live candidates"
-                      placeholder="App, publisher, or listing ID…"
+                      placeholder="Channel, app, developer, or source ID…"
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
                     />
                   </div>
-                  {page==='Findings & Investigations'&&<select aria-label="Filter by source" value={sourceFilter} onChange={e=>setSourceFilter(e.target.value)}><option value="all">All sources</option><option value="bluesky">Bluesky</option><option value="apple">Apple App Store</option></select>}
+                  {page==='Findings & Investigations'&&<select aria-label="Filter by source" value={sourceFilter} onChange={e=>setSourceFilter(e.target.value)}><option value="all">All sources</option><option value="youtube">YouTube</option><option value="apple">Apple App Store</option></select>}
                   <select
                     aria-label="Filter by brand"
                     value={brandFilter}
@@ -1639,9 +1821,7 @@ export default function LiveWorkspace() {
                     <div>
                       <b>
                         {s.brandName} ·{" "}
-                        {s.provider === "bluesky"
-                          ? "Bluesky Global"
-                          : "App Store " + s.country.toUpperCase()}
+                        {providerLabel(s.provider)} · {s.country.toUpperCase()}
                       </b>
                       <small>
                         {time(s.startedAt)}
@@ -1726,7 +1906,7 @@ export default function LiveWorkspace() {
                       <div>
                         <b>Review candidate: {c.name}</b>
                         <small>
-                          {c.provider === "bluesky" ? "Bluesky" : "Apple"} API ·
+                          {providerLabel(c.provider)} API ·
                           Score {a.score} at alert · {time(a.createdAt)}
                         </small>
                       </div>
@@ -1744,9 +1924,6 @@ export default function LiveWorkspace() {
               </div>
             </>
           ) : null}
-          {page === "Demo & Evaluation" && (
-            <Evaluation onNavigate={navigate} onToast={setToast} />
-          )}
           {page === "Settings" ? (
             <div className="settings-grid">
               <section className="panel settings-panel wide">
@@ -1757,27 +1934,20 @@ export default function LiveWorkspace() {
                 {[
                   [
                     "Apple App Store",
-                    "Live public search · no credentials required",
+                    "Apple Ads Platform API · server OAuth credentials",
                     providerError
                       ? "Error"
                       : provider?.apple.status || "Checking…",
                   ],
                   [
-                    "Bluesky",
-                    "Live public profile search · no credentials required",
-                    providerError
-                      ? "Error"
-                      : provider?.bluesky?.status || "Checking…",
-                  ],
-                  [
                     "YouTube",
-                    "Authorized API key and authentication needed",
-                    "Not Configured",
+                    "YouTube Data API v3 · server API key",
+                    providerError ? "Error" : provider?.youtube.status || "Checking…",
                   ],
                   [
-                    "Company accounts",
-                    "No private cloud workspace or simulated login",
-                    "Not Configured",
+                    "Company account",
+                    hasSupabaseConfig ? "Supabase Email + Password · row-level security" : "Add Supabase browser config",
+                    hasSupabaseConfig ? "Connected" : "Not Configured",
                   ],
                   [
                     "Email delivery",
@@ -1785,9 +1955,9 @@ export default function LiveWorkspace() {
                     "Not Configured",
                   ],
                   [
-                    "AI assistant",
-                    "Transparent local heuristics replace unsupported AI calls",
-                    "Not Configured",
+                    "Gemini assistant",
+                    "Gemini API · server-side key",
+                    provider?.assistant?.status || "Checking…",
                   ],
                 ].map(([name, desc, status]) => (
                   <div className="integration-row" key={name}>
@@ -1795,7 +1965,7 @@ export default function LiveWorkspace() {
                       <b>{name}</b>
                       <small>{desc}</small>
                     </div>
-                    <Tag tone={status === "Connected" ? "green" : ""}>
+                    <Tag tone={["Available", "Connected"].includes(status) ? "green" : ""}>
                       {status}
                     </Tag>
                   </div>
@@ -1805,11 +1975,11 @@ export default function LiveWorkspace() {
                   {time(provider?.apple.lastSuccess || null)}
                 </p>
                 <p>
-                  Last successful Bluesky response:{" "}
-                  {time(provider?.bluesky?.lastSuccess || null)}
+                  Last successful YouTube response: {" "}
+                  {time(provider?.youtube.lastSuccess || null)}
                 </p>
-                {provider?.bluesky?.lastError && (
-                  <p role="alert">Bluesky: {provider.bluesky.lastError}</p>
+                {provider?.youtube.lastError && (
+                  <p role="alert">YouTube: {provider.youtube.lastError}</p>
                 )}
                 {provider?.apple.lastError && (
                   <p role="alert">
@@ -1913,23 +2083,24 @@ export default function LiveWorkspace() {
               <section className="panel settings-panel">
                 <h3>
                   <LockKeyhole size={18} />
-                  Local storage & privacy
+                  {hasSupabaseConfig ? "Account data & privacy" : "Local storage & privacy"}
                 </h3>
                 <p>
-                  This workspace is not authenticated. Brands, scans, decisions,
-                  and alerts are kept in this browser’s localStorage, separate
-                  from demo data. Anyone using this browser profile may access
-                  them.
+                  {hasSupabaseConfig
+                    ? "Brands, scans, decisions, and alerts are stored in your authenticated Supabase account with row-level security."
+                    : "This workspace is not authenticated. Brands, scans, decisions, and alerts are kept in this browser’s localStorage. Anyone using this browser profile may access them."}
                 </p>
                 <p>
                   Only the public brand name, region, and result limit are sent
-                  to the selected provider through this server. Descriptions,
-                  official asset evidence and review notes stay in your browser.
-                  The server caches public search responses in memory for five
-                  minutes.
+                  to YouTube or Apple Ads through this server. When you submit
+                  a chat message, recent turns and a concise workspace summary
+                  are sent to Google Gemini. Search responses are cached in
+                  memory for five minutes. Optional logo comparison sends
+                  provider image URLs to this server; uploaded reference images
+                  stay in your browser.
                 </p>
                 <label>
-                  Local history retention
+                  History retention
                   <select
                     value={state.prefs.retention}
                     onChange={(e) =>
@@ -1948,8 +2119,9 @@ export default function LiveWorkspace() {
                   </select>
                 </label>
                 <small>
-                  Expired scan history and candidate evidence are removed when
-                  you next open this workspace. Brand registrations remain.
+                  {hasSupabaseConfig
+                    ? "Retention is saved as a preference; cloud data is not automatically deleted."
+                    : "Expired scan history and candidate evidence are removed when you next open this workspace. Brand registrations remain."}
                 </small>
                 <Button
                   variant="outline"
@@ -1958,14 +2130,15 @@ export default function LiveWorkspace() {
                   }
                 >
                   <ArrowDownToLine size={15} />
-                  Export local workspace
+                  {hasSupabaseConfig ? "Export workspace" : "Export local workspace"}
                 </Button>
               </section>
               <section className="panel settings-panel wide">
                 <h3>Data controls</h3>
                 <p>
-                  Clear only this browser’s live workspace. Demo records and
-                  remote platforms are unaffected. Export your reviews first.
+                  {hasSupabaseConfig
+                    ? "Permanently delete this account’s workspace data. Remote platforms are unaffected. Export your reviews first."
+                    : "Clear only this browser’s live workspace. Remote platforms are unaffected. Export your reviews first."}
                 </p>
                 <Button
                   variant="destructive"
@@ -1973,11 +2146,17 @@ export default function LiveWorkspace() {
                   onClick={() => {
                     if (
                       confirm(
-                        "Permanently clear all live brands, scan history, evidence, alerts and reviews in this browser?",
+                        hasSupabaseConfig
+                          ? "Permanently clear all brands, scan history, evidence, alerts, and reviews in your account?"
+                          : "Permanently clear all live brands, scan history, evidence, alerts and reviews in this browser?",
                       )
                     ) {
                       setState(structuredClone(INITIAL));
-                      setToast("Local live workspace cleared.");
+                      setToast(
+                        hasSupabaseConfig
+                          ? "Workspace clear queued for your account."
+                          : "Local live workspace cleared.",
+                      );
                       setSelectedId(null);
                     }
                   }}
@@ -1993,7 +2172,7 @@ export default function LiveWorkspace() {
           <span>WOLVGUARD / TEAM WOLVANT</span>
           <span>
             <span className="dot" />
-            Live public data · Local workspace
+            Live public data · {hasSupabaseConfig ? "Account workspace" : "Local workspace"}
           </span>
         </div>
       </div>
@@ -2046,7 +2225,7 @@ export default function LiveWorkspace() {
                 name="description"
                 maxLength={1000}
                 defaultValue={editing?.description}
-                placeholder="Used for a local text comparison when provided."
+                placeholder="Used for explainable text comparison when provided."
               />
             </label>
             <label>
@@ -2078,8 +2257,9 @@ export default function LiveWorkspace() {
             <div className="notice">
               <LockKeyhole size={18} />
               <span>
-                Saved only in this browser. Registration does not prove
-                ownership or verify any app.
+                {hasSupabaseConfig
+                  ? "Saved to your workspace. Registration does not prove ownership or verify any app."
+                  : "Saved only in this browser. Registration does not prove ownership or verify any channel or app."}
               </span>
             </div>
             <Button type="submit" disabled={imageBusy}>
@@ -2101,11 +2281,11 @@ export default function LiveWorkspace() {
                 name="provider"
                 value={scanProvider}
                 onChange={(e) =>
-                  setScanProvider(e.target.value as "apple" | "bluesky")
+                  setScanProvider(e.target.value as "apple" | "youtube")
                 }
               >
                 <option value="apple">Apple App Store</option>
-                <option value="bluesky">Bluesky social profiles</option>
+                <option value="youtube">YouTube channels</option>
               </select>
             </label>
             <label>
@@ -2121,11 +2301,10 @@ export default function LiveWorkspace() {
             <label>
               {scanProvider === "apple"
                 ? "App Store region"
-                : "Region (Bluesky searches globally)"}
+                : "YouTube region"}
               <select
                 name="country"
                 defaultValue="us"
-                disabled={scanProvider === "bluesky"}
               >
                 {Object.entries(regions).map(([k, v]) => (
                   <option key={k} value={k}>
@@ -2152,9 +2331,9 @@ export default function LiveWorkspace() {
             </div>
             <Button type="submit" disabled={busy || !activeBrands.length}>
               <ScanLine size={16} />
-              {scanProvider === "bluesky"
-                ? "Run live Bluesky scan"
-                : "Run live Apple scan"}
+              {scanProvider === "youtube"
+                ? "Search YouTube channels"
+                : "Search Apple apps"}
             </Button>
           </form>
         </Dialog>
@@ -2179,7 +2358,7 @@ export default function LiveWorkspace() {
                 <b>{a.name}</b>
                 <small>
                   {a.publisher || "Publisher not provided"} ·{" "}
-                  {a.provider === "bluesky" ? "Bluesky DID" : "Apple ID"}{" "}
+                  {providerLabel(a.provider)} ID{" "}
                   {a.sourceId}
                 </small>
                 <a
@@ -2250,11 +2429,11 @@ export default function LiveWorkspace() {
                   name="assetProvider"
                   value={assetProvider}
                   onChange={(e) =>
-                    setAssetProvider(e.target.value as "apple" | "bluesky")
+                    setAssetProvider(e.target.value as "apple" | "youtube")
                   }
                 >
                   <option value="apple">Apple App Store</option>
-                  <option value="bluesky">Bluesky</option>
+                  <option value="youtube">YouTube</option>
                 </select>
               </label>
               <label>
@@ -2270,17 +2449,14 @@ export default function LiveWorkspace() {
                   placeholder={
                     assetProvider === "apple"
                       ? "https://apps.apple.com/us/app/example/id123456789"
-                      : "https://bsky.app/profile/yourbrand.com"
+                      : "https://www.youtube.com/channel/UC…"
                   }
                 />
               </label>
               <label>
-                {assetProvider === "apple"
-                  ? "Publisher / developer (optional)"
-                  : "Handle (resolved from Bluesky automatically)"}
+                Publisher / creator (optional)
                 <input
                   name="publisher"
-                  disabled={assetProvider === "bluesky"}
                   maxLength={200}
                   placeholder="Exact registered publisher name"
                 />
@@ -2306,8 +2482,7 @@ export default function LiveWorkspace() {
             )}
             <div>
               <Tag tone="green">
-                Real {selected.provider === "bluesky" ? "Bluesky" : "Apple"} API
-                result
+                Real {providerLabel(selected.provider)} API result
               </Tag>
               <p>
                 {selected.publisher || "Publisher metadata unavailable"} ·{" "}
@@ -2352,9 +2527,7 @@ export default function LiveWorkspace() {
             </div>
             <div>
               <small>
-                {selected.provider === "bluesky"
-                  ? "Bluesky DID"
-                  : "Apple listing ID"}
+                {providerLabel(selected.provider)} ID
               </small>
               <b>{selected.sourceId}</b>
             </div>
@@ -2363,7 +2536,7 @@ export default function LiveWorkspace() {
               <b>{time(selected.fetchedAt)}</b>
             </div>
             <div>
-              <small>Last scanned locally</small>
+              <small>Last scanned</small>
               <b>{time(selected.lastScanAt)}</b>
             </div>
             <div>
@@ -2473,7 +2646,7 @@ export default function LiveWorkspace() {
               />
             </label>
             <Button type="submit">
-              Save local review <Check size={15} />
+              {hasSupabaseConfig ? "Save review" : "Save local review"} <Check size={15} />
             </Button>
           </form>
           <h3>Review history</h3>
@@ -2481,7 +2654,7 @@ export default function LiveWorkspace() {
             selected.reviews.map((r) => (
               <div className="review-entry" key={r.id}>
                 <b>{r.status}</b>
-                <small>Local reviewer (not authenticated) · {time(r.at)}</small>
+                <small>{hasSupabaseConfig ? "Account reviewer" : "Local reviewer (not authenticated)"} · {time(r.at)}</small>
                 <p>{r.note}</p>
                 <small>
                   Score at review: {r.scoreAtReview} · Evidence fetched{" "}
@@ -2502,9 +2675,7 @@ export default function LiveWorkspace() {
                 {
                   dataMode: "live",
                   source:
-                    selected.provider === "bluesky"
-                      ? "Bluesky public profile search"
-                      : "Apple App Store Search",
+                    `${providerLabel(selected.provider)} search`,
                   candidate: selected,
                   brand: state.brands.find((b) => b.id === selected.brandId),
                 },
@@ -2524,9 +2695,7 @@ export default function LiveWorkspace() {
           </Tag>
           <h3>
             {scan.brandName} ·{" "}
-            {scan.provider === "bluesky"
-              ? "Bluesky Global"
-              : "Apple App Store · " + scan.country.toUpperCase()}
+            {providerLabel(scan.provider)} · {scan.country.toUpperCase()}
           </h3>
           <div className="evidence-grid">
             <div>
@@ -2561,11 +2730,8 @@ export default function LiveWorkspace() {
           )}
           <p>
             Provider:{" "}
-            {scan.provider === "bluesky"
-              ? "Bluesky public AppView"
-              : "Apple public Search API"}
-            . Data mode: Live. This record is stored only in your current
-            browser.
+            {providerLabel(scan.provider)} API
+            . Data mode: Live. {hasSupabaseConfig ? "This record is saved to your account workspace." : "This record is stored in this browser."}
           </p>
           <Button
             variant="outline"
@@ -2575,6 +2741,48 @@ export default function LiveWorkspace() {
             Export scan record
           </Button>
         </Dialog>
+      )}
+      <button
+        className="chat-launcher"
+        aria-label={assistantOpen ? "Close assistant" : "Open Gemini assistant"}
+        onClick={() => setAssistantOpen((open) => !open)}
+      >
+        {assistantOpen ? <X size={22} /> : <MessageSquare size={22} />}
+      </button>
+      {assistantOpen && (
+        <section className="chat-panel" aria-label="Gemini workspace assistant">
+          <div className="panel-title">
+            <h3><Shield size={16} /> WolvGuard assistant</h3>
+            <Tag>{provider?.assistant?.status === "Available" ? "Gemini" : "Offline"}</Tag>
+          </div>
+          <div className="chat-messages" aria-live="polite">
+            <small>Your recent messages and a workspace summary are sent to Google Gemini. Verify important decisions against source evidence.</small>
+            {!assistantMessages.length && (
+              <p>Ask about findings, scan results, or how risk signals are calculated.</p>
+            )}
+            {assistantMessages.map((message, index) => (
+              <p key={`${index}-${message.role}`} className={message.role === "user" ? "user-message" : ""}>
+                {message.text}
+              </p>
+            ))}
+            {assistantBusy && <p role="status">Thinking…</p>}
+            {assistantError && <p role="alert">{assistantError}</p>}
+          </div>
+          <form onSubmit={askAssistant}>
+            <input
+              value={assistantDraft}
+              onChange={(event) => setAssistantDraft(event.target.value)}
+              maxLength={1200}
+              required
+              placeholder="Ask about your workspace…"
+              aria-label="Message Gemini assistant"
+              disabled={assistantBusy}
+            />
+            <button aria-label="Send message" disabled={assistantBusy || !assistantDraft.trim()}>
+              <Send size={17} />
+            </button>
+          </form>
+        </section>
       )}
     </div>
   );

@@ -50,8 +50,21 @@ const DotGlobeHero = lazy(() =>
 const LiveWorkspace = lazy(() => import("./components/live/LiveWorkspace"));
 import { LogoCloud } from "./components/ui/logo-cloud-2";
 import { Button } from "./components/ui/button";
-import { seedBrands, seedFindings, type Brand, type Finding } from "./lib/data";
+import type { Brand, Finding } from "./lib/data";
 import { detect } from "./lib/detection";
+import {
+  getAuthErrorMessage,
+  hasSupabaseConfig,
+  signInWithPassword,
+  signUpWithPassword,
+  supabase,
+} from "./lib/supabase";
+import type { Session } from "@supabase/supabase-js";
+function openDashboard() {
+  sessionStorage.setItem("wg-live-page", "Overview");
+  location.hash = "live";
+}
+
 const navs = [
   ["Overview", LayoutDashboard],
   ["Brand Profiles", Building2],
@@ -101,22 +114,18 @@ function Badge({
 }) {
   return <span className={`badge ${tone}`}>{children}</span>;
 }
-function useLocal<T>(key: string, initial: T) {
-  const [v, set] = useState<T>(() => {
-    try {
-      return JSON.parse(localStorage.getItem(key) || "null") ?? initial;
-    } catch {
-      return initial;
-    }
-  });
-  useEffect(() => localStorage.setItem(key, JSON.stringify(v)), [key, v]);
-  return [v, set] as const;
+function useLocal<T>(_key: string, initial: T) {
+  return useState<T>(initial);
 }
 export default function App() {
-  const [route, setRoute] = useState(location.hash.slice(1) || "home");
+  const [route, setRoute] = useState(() => {
+    const current = location.hash.slice(1) || "home";
+    if (current === "app" || current === "live") return "live";
+    return ["home", "login"].includes(current) ? current : "home";
+  });
   const [page, setPage] = useState("Overview");
-  const [brands, setBrands] = useLocal("wg-demo-brands", seedBrands);
-  const [findings, setFindings] = useLocal("wg-demo-findings", seedFindings);
+  const [brands, setBrands] = useLocal<Brand[]>("wg-demo-brands", []);
+  const [findings, setFindings] = useLocal<Finding[]>("wg-demo-findings", []);
   const [toast, setToast] = useState("");
   const [modal, setModal] = useState("");
   const [editing, setEditing] = useState<Brand | null>(null);
@@ -132,30 +141,135 @@ export default function App() {
   const [light, setLight] = useState(false);
   const [busy, setBusy] = useState(false);
   const [read, setRead] = useLocal("wg-read", false);
-  const [scans, setScans] = useLocal("wg-scans", [
-    {
-      id: "s1",
-      brand: "Acme",
-      source: "YouTube",
-      date: "2026-10-12T10:30:00Z",
-      count: 3,
-      status: "Completed",
-    },
-    {
-      id: "s2",
-      brand: "Luma",
-      source: "App Store",
-      date: "2026-10-11T09:20:00Z",
-      count: 2,
-      status: "Completed",
-    },
-  ]);
+  const [scans, setScans] = useLocal("wg-scans", [] as {
+    id: string;
+    brand: string;
+    source: string;
+    date: string;
+    count: number;
+    status: string;
+  }[]);
   const [threshold, setThreshold] = useLocal("wg-threshold", 60);
   const [chat, setChat] = useState(false);
   const [messages, setMessages] = useState<string[]>([]);
+  const [authSession, setAuthSession] = useState<Session | null>(null);
+  const [authReady, setAuthReady] = useState(!hasSupabaseConfig);
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authConfirmPassword, setAuthConfirmPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authCooldown, setAuthCooldown] = useState(0);
   useEffect(() => {
+    if (!authCooldown) return;
+    const timer = window.setTimeout(
+      () => setAuthCooldown((remaining) => Math.max(0, remaining - 1)),
+      1000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [authCooldown]);
+  useEffect(() => {
+    if (!hasSupabaseConfig) return;
+    let active = true;
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setAuthSession(session);
+      setAuthReady(true);
+    });
+    void supabase.auth
+      .getSession()
+      .then(({ data, error }) => {
+        if (!active) return;
+        if (!error) setAuthSession(data.session);
+        setAuthReady(true);
+      })
+      .catch(() => {
+        if (active) setAuthReady(true);
+      });
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+  useEffect(() => {
+    if (!hasSupabaseConfig || !authReady) return;
+    if (route === "live" && !authSession) location.hash = "login";
+    if (route === "login" && authSession) location.hash = "live";
+  }, [authReady, authSession, route]);
+  async function handleAuthSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (authBusy || authCooldown > 0) return;
+    const email = authEmail.trim().toLowerCase();
+    const password = authPassword;
+    if (!email) {
+      setToast("Enter your email address.");
+      return;
+    }
+    if (!password) {
+      setToast("Enter your password.");
+      return;
+    }
+    if (!hasSupabaseConfig) {
+      setToast("Add VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY to enable Supabase authentication.");
+      return;
+    }
+    if (authMode === "signup") {
+      if (password.length < 8) {
+        setToast("Choose a password with at least 8 characters.");
+        return;
+      }
+      if (password !== authConfirmPassword) {
+        setToast("Passwords do not match.");
+        return;
+      }
+    }
+    try {
+      setAuthBusy(true);
+      if (authMode === "login") {
+        const data = await signInWithPassword(email, password);
+        setAuthSession(data.session);
+        setToast("Signed in successfully.");
+        location.hash = "live";
+      } else {
+        const data = await signUpWithPassword(email, password);
+        setAuthSession(data.session);
+        setAuthPassword("");
+        setAuthConfirmPassword("");
+        if (data.session) {
+          setToast("Account created successfully.");
+          location.hash = "live";
+        } else {
+          setAuthMode("login");
+          setToast("Account created. Check your email if confirmation is required, then sign in.");
+        }
+      }
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "status" in error &&
+        error.status === 429
+      ) {
+        setAuthCooldown(60);
+      }
+      setToast(getAuthErrorMessage(error, authMode));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+  useEffect(() => {
+    if (location.hash === "#app") location.hash = "live";
     const fn = () => {
-      setRoute(location.hash.slice(1) || "home");
+      const next = location.hash.slice(1) || "home";
+      const normalized =
+        next === "app" || next === "live"
+          ? "live"
+          : ["home", "login"].includes(next)
+            ? next
+            : "home";
+      setRoute(normalized);
+      if (normalized !== next) location.hash = normalized;
       window.scrollTo(0, 0);
     };
     window.addEventListener("hashchange", fn);
@@ -224,10 +338,8 @@ export default function App() {
     return () => document.removeEventListener("keydown", key);
   }, []);
   function go(p: string) {
-    setPage(p);
-    setQuery("");
-    setPagination(1);
-    location.hash = "app";
+    sessionStorage.setItem("wg-live-page", p);
+    location.hash = "live";
   }
   function notify(t: string) {
     setToast(t);
@@ -690,6 +802,19 @@ export default function App() {
       </>
     );
   }
+  if (
+    route === "live" &&
+    hasSupabaseConfig &&
+    (!authReady || !authSession)
+  ) {
+    return (
+      <div className="workspace-loading" role="status">
+        <ShieldCheck size={38} />
+        <h2>{authReady ? "Redirecting to sign in" : "Checking your session"}</h2>
+        <p>Verifying your Supabase account…</p>
+      </div>
+    );
+  }
   return route === "live" ? (
     <Suspense
       fallback={
@@ -700,7 +825,7 @@ export default function App() {
         </div>
       }
     >
-      <LiveWorkspace />
+      <LiveWorkspace userId={authSession?.user.id ?? null} />
     </Suspense>
   ) : (
     <div className={light ? "site light" : "site"}>
@@ -749,7 +874,7 @@ export default function App() {
               <a href="#login" className="signin-link">
                 Sign in <ArrowUpRight size={13} />
               </a>
-              <Button onClick={() => (location.hash = "live")}>
+              <Button onClick={openDashboard}>
                 Get started <ArrowRight size={15} />
               </Button>
             </div>
@@ -775,7 +900,7 @@ export default function App() {
                   Protect the trust you’ve worked to build.
                 </p>
                 <div className="hero-actions">
-                  <Button size="lg" onClick={() => (location.hash = "live")}>
+                  <Button size="lg" onClick={openDashboard}>
                     Launch dashboard <ArrowRight size={17} />
                   </Button>
                   <Button
@@ -836,11 +961,11 @@ export default function App() {
                     <ScanLine size={18} />
                   </span>
                   <div>
-                    <small>POTENTIAL MATCH DETECTED</small>
+                    <small>SOURCE REVIEW</small>
                     <b>
-                      Acme Support <Badge tone="amber">Review</Badge>
+                      Human verification required
                     </b>
-                    <em>Synthetic example · YouTube</em>
+                    <em>Name similarity is a signal, not a verdict.</em>
                   </div>
                 </div>
                 <div className="globe-label">
@@ -852,68 +977,6 @@ export default function App() {
                 <span>
                   01 / INTELLIGENCE WITHOUT THE NOISE <ArrowRight size={13} />
                 </span>
-              </div>
-            </section>
-            <section className="preview-section">
-              <div className="section-intro">
-                <div>
-                  <div className="eyebrow">
-                    <span className="dot" /> MEET YOUR COMMAND CENTER
-                  </div>
-                  <h2>
-                    Less noise. <span>More clarity.</span>
-                  </h2>
-                </div>
-                <p>
-                  Your brand’s entire risk landscape.
-                  <br />
-                  One focused workspace.
-                </p>
-              </div>
-              <div className="dashboard-window">
-                <div className="window-bar">
-                  <div className="window-dots">
-                    <i />
-                    <i />
-                    <i />
-                  </div>
-                  <span>
-                    <LockKeyhole size={11} /> wolvguard / overview
-                  </span>
-                  <Badge tone="demo">
-                    <span className="dot" /> INTERACTIVE DEMO
-                  </Badge>
-                </div>
-                <div className="mini-app">
-                  <aside className="mini-sidebar">
-                    <Mark />
-                    {[
-                      LayoutDashboard,
-                      Building2,
-                      Globe,
-                      Smartphone,
-                      Shield,
-                      Settings,
-                    ].map((I, i) => (
-                      <button
-                        key={i}
-                        className={i === 0 ? "active" : ""}
-                        aria-label={navs[[0, 1, 2, 3, 4, 7][i]][0]}
-                        onClick={() => go(navs[[0, 1, 2, 3, 4, 7][i]][0])}
-                      >
-                        <I size={17} />
-                      </button>
-                    ))}
-                  </aside>
-                  <div className="preview-dashboard">{dashboard(true)}</div>
-                </div>
-                <div className="preview-foot">
-                  <ShieldCheck size={12} />
-                  Demo Data — Not Live Threat Intelligence{" "}
-                  <button onClick={() => go("Overview")}>
-                    Explore the workspace <ArrowUpRight size={12} />
-                  </button>
-                </div>
               </div>
             </section>
             <LogoCloud />
@@ -936,12 +999,12 @@ export default function App() {
                   [
                     Globe,
                     "Social impersonation detection",
-                    "Find lookalike identities using live Bluesky public profile searches. YouTube is available as a labelled demo.",
+                    "Search public YouTube channels using the configured YouTube Data API key.",
                   ],
                   [
                     Smartphone,
                     "Mobile app monitoring",
-                    "Surface similar App Store listings and investigate unexpected publishers.",
+                    "Search Apple App Store apps through the Apple Ads Platform API and investigate unexpected developers.",
                   ],
                   [
                     ShieldCheck,
@@ -1078,8 +1141,8 @@ export default function App() {
                   first line of defense.
                 </h3>
                 <p>Explore a safer digital world for your brand.</p>
-                <Button onClick={() => go("Overview")}>
-                  Launch demo workspace <ArrowRight size={16} />
+                <Button onClick={openDashboard}>
+                  Open workspace <ArrowRight size={16} />
                 </Button>
                 <small>No sign-up required. Synthetic data only.</small>
               </div>
@@ -1118,38 +1181,98 @@ export default function App() {
               Back to home
             </a>
             <div>
-              <Badge tone="demo">Demo environment</Badge>
+              <Badge tone={hasSupabaseConfig ? "green" : "demo"}>
+                {hasSupabaseConfig ? "Account access" : "Local environment"}
+              </Badge>
               <h2>
                 Your brand’s
                 <br />
                 next line of defense.
               </h2>
               <p>
-                Company sign-in is not configured. Use the local live workspace
-                for real public social and app searches, without creating an
-                account.
+                {authMode === "signup"
+                  ? "Create an account to connect your private workspace."
+                  : hasSupabaseConfig
+                    ? "Sign in with your email and password to open your private workspace."
+                    : "Company sign-in is not configured. Use the local live workspace for real public social and app searches, without creating an account."}
               </p>
               <div className="notice">
                 <LockKeyhole size={20} />
                 <span>
-                  No private cloud account is connected. Local live data is
-                  stored only in this browser. Do not enter sensitive company
-                  information.
+                  {hasSupabaseConfig
+                    ? "Your workspace syncs to Supabase after you sign in."
+                    : "No private cloud account is connected. Local live data is stored only in this browser. Do not enter sensitive company information."}
                 </span>
               </div>
-              <Button onClick={() => (location.hash = "live")}>
-                Open local live workspace <ArrowRight size={16} />
-              </Button>
-              <button
-                className="text-button"
-                onClick={() => {
-                  go("Settings");
-                }}
-              >
-                View connection instructions <ArrowUpRight size={13} />
-              </button>
+              {hasSupabaseConfig && (
+                <form className="supabase-auth" onSubmit={handleAuthSubmit}>
+                  <input
+                    type="email"
+                    autoComplete="email"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    placeholder="name@company.com"
+                    aria-label="Work email"
+                    required
+                  />
+                  <input
+                    type="password"
+                    autoComplete={authMode === "signup" ? "new-password" : "current-password"}
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    placeholder="Password"
+                    aria-label="Password"
+                    minLength={authMode === "signup" ? 8 : undefined}
+                    required
+                  />
+                  {authMode === "signup" && (
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={authConfirmPassword}
+                      onChange={(e) => setAuthConfirmPassword(e.target.value)}
+                      placeholder="Confirm password"
+                      aria-label="Confirm password"
+                      minLength={8}
+                      required
+                    />
+                  )}
+                  <Button
+                    type="submit"
+                    disabled={authBusy || authCooldown > 0}
+                  >
+                    {authBusy
+                      ? "Please wait..."
+                      : authCooldown > 0
+                        ? `Wait ${authCooldown}s`
+                        : authMode === "signup"
+                          ? "Create account"
+                          : "Login"}
+                    <ArrowRight size={16} />
+                  </Button>
+                </form>
+              )}
+              {hasSupabaseConfig && (
+                <button
+                  className="text-button auth-mode-switch"
+                  type="button"
+                  onClick={() => {
+                    setAuthMode(authMode === "login" ? "signup" : "login");
+                    setAuthPassword("");
+                    setAuthConfirmPassword("");
+                  }}
+                >
+                  {authMode === "login"
+                    ? "Create an account"
+                    : "Already have an account? Log in"}
+                </button>
+              )}
             </div>
-            <small>Local access is not an authenticated session.</small>
+            <small>
+              {hasSupabaseConfig
+                ? "Private workspace access requires a signed-in account."
+                : "Local access is not an authenticated session."}
+            </small>
           </div>
         </div>
       ) : (
@@ -1819,8 +1942,8 @@ export default function App() {
                                 "Reset all sample brands, findings and reviews?",
                               )
                             ) {
-                              setBrands(seedBrands);
-                              setFindings(seedFindings);
+                              setBrands([]);
+                              setFindings([]);
                               notify("Demo brands and findings reset.");
                             }
                           }}

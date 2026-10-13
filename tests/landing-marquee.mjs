@@ -1,0 +1,17 @@
+import {chromium,expect} from '@playwright/test';
+const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+const page=await browser.newPage({viewport:{width:1440,height:1000}});
+const errors=[];page.on('pageerror',e=>errors.push(e.message));
+await page.goto('http://localhost:5173');
+await expect(page.locator('.preview-section')).toHaveCount(0);
+await expect(page.locator('.dashboard-window')).toHaveCount(0);
+await expect(page.getByText('Less noise.',{exact:false})).toHaveCount(0);
+const x=()=>page.locator('.platform-marquee-track').evaluate(el=>new DOMMatrix(getComputedStyle(el).transform).m41);
+const before=await x();await page.waitForTimeout(800);const after=await x();expect(after).toBeLessThan(before);
+await page.getByRole('button',{name:'Pause platform marquee',exact:true}).click();const paused=await x();await page.waitForTimeout(350);expect(Math.abs((await x())-paused)).toBeLessThan(1);
+await page.getByRole('button',{name:'Resume platform marquee',exact:true}).click();const resumed=await x();await page.waitForTimeout(400);expect(await x()).toBeLessThan(resumed);
+await page.evaluate(()=>sessionStorage.setItem('wg-live-page','App Monitoring'));
+await page.getByRole('button',{name:'Launch dashboard',exact:true}).click();await expect(page.locator('.live-site')).toBeVisible();await expect(page.locator('.section-heading h2')).toContainText('Your live risk landscape');
+await page.goto('http://localhost:5173/#home');await page.setViewportSize({width:390,height:844});await expect(page.locator('.platform-strip')).toBeAttached();expect(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)).toBe(false);
+await page.emulateMedia({reducedMotion:'reduce'});await expect(page.locator('.platform-marquee-track')).toHaveCSS('animation-name','none');await expect(page.getByRole('button',{name:'Pause platform marquee'})).toBeHidden();expect(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)).toBe(false);
+expect(errors).toEqual([]);console.log('PASS: preview removed; launch opens Overview; marquee moves left, pauses and resumes; mobile and reduced-motion layouts work; no page errors.');await browser.close();

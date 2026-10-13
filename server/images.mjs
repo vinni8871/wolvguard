@@ -1,8 +1,8 @@
 import sharp from 'sharp';import{ProviderError}from'./providers.mjs';
 const cache=new Map();let running=0;
-export function allowedImage(value){try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&(!u.port||u.port==='443')&&(u.hostname==='cdn.bsky.app'||/^is\d+-ssl\.mzstatic\.com$/.test(u.hostname))}catch{return false}}
+export function allowedImage(value){try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&(!u.port||u.port==='443')&&(u.hostname==='cdn.bsky.app'||u.hostname==='yt3.ggpht.com'||u.hostname==='i.ytimg.com'||/^is\d+-ssl\.mzstatic\.com$/.test(u.hostname))}catch{return false}}
 export async function imageFingerprint(url){
- if(typeof url!=='string'||url.length>2000||!allowedImage(url))throw new ProviderError('IMAGE_SOURCE_NOT_ALLOWED','Only image URLs returned by Apple or Bluesky are accepted.',400);
+ if(typeof url!=='string'||url.length>2000||!allowedImage(url))throw new ProviderError('IMAGE_SOURCE_NOT_ALLOWED','Only image URLs returned by Apple, YouTube, or Bluesky are accepted.',400);
  const stored=cache.get(url);if(stored&&Date.now()-stored.at<3600000)return {...stored.value,cacheHit:true};
  if(running>=4)throw new ProviderError('IMAGE_BUSY','Image comparison is temporarily busy.',429);
  running++;try{

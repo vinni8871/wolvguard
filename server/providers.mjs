@@ -1,3 +1,5 @@
+import { createSign } from "node:crypto";
+
 /** Public, permitted provider. No scraping and no API secrets. */
 export class ProviderError extends Error {
   constructor(code, message, status = 502) {
@@ -152,11 +154,229 @@ export async function searchApple(params, fetcher = fetch) {
     term: params.term,
   };
 }
+
+let appleAdsToken = { value: "", expiresAt: 0 };
+
+function appleAdsCredentials() {
+  const clientId = process.env.APPLE_ADS_CLIENT_ID;
+  const teamId = process.env.APPLE_ADS_TEAM_ID;
+  const keyId = process.env.APPLE_ADS_KEY_ID;
+  const accountId = process.env.APPLE_ADS_AD_ACCOUNT_ID;
+  const privateKey = process.env.APPLE_ADS_PRIVATE_KEY?.replace(/\\n/g, "\n");
+  if (!clientId || !teamId || !keyId || !accountId || !privateKey) {
+    throw new ProviderError(
+      "NOT_CONFIGURED",
+      "Apple Ads credentials are not configured on the server.",
+      503,
+    );
+  }
+  return { clientId, teamId, keyId, accountId, privateKey };
+}
+
+async function getAppleAdsAccessToken(fetcher = fetch) {
+  if (appleAdsToken.value && appleAdsToken.expiresAt > Date.now() + 30000) {
+    return appleAdsToken.value;
+  }
+  const { clientId, teamId, keyId, privateKey } = appleAdsCredentials();
+  const now = Math.floor(Date.now() / 1000);
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const unsigned = [
+    encode({ alg: "ES256", kid: keyId }),
+    encode({
+      iss: teamId,
+      iat: now,
+      exp: now + 86400,
+      aud: "https://appleid.apple.com",
+      sub: clientId,
+    }),
+  ].join(".");
+  let clientSecret;
+  try {
+    const signer = createSign("SHA256");
+    signer.update(unsigned);
+    signer.end();
+    clientSecret = `${unsigned}.${signer.sign({ key: privateKey, dsaEncoding: "ieee-p1363" }).toString("base64url")}`;
+  } catch {
+    throw new ProviderError("APPLE_ADS_KEY_INVALID", "Apple Ads private key is invalid.", 503);
+  }
+
+  let response;
+  try {
+    response = await fetcher("https://appleid.apple.com/auth/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret,
+        scope: "searchadsorg",
+      }),
+      signal: AbortSignal.timeout(12000),
+    });
+  } catch {
+    throw new ProviderError("APPLE_AUTH_UNREACHABLE", "Apple Ads authentication is unavailable.", 503);
+  }
+  if (!response.ok) {
+    throw new ProviderError("APPLE_AUTH_FAILED", "Apple Ads rejected its server credentials.", 503);
+  }
+  const data = await response.json().catch(() => null);
+  if (typeof data?.access_token !== "string" || typeof data?.expires_in !== "number") {
+    throw new ProviderError("APPLE_AUTH_RESPONSE", "Apple Ads returned an invalid token response.", 503);
+  }
+  appleAdsToken = {
+    value: data.access_token,
+    expiresAt: Date.now() + data.expires_in * 1000,
+  };
+  return appleAdsToken.value;
+}
+
+export async function searchAppleAds(params, fetcher = fetch) {
+  const { accountId } = appleAdsCredentials();
+  const accessToken = await getAppleAdsAccessToken(fetcher);
+  const url = new URL("https://api.ads.apple.com/v1/search/apps");
+  url.search = new URLSearchParams({
+    query: params.term,
+    storeFronts: params.country.toUpperCase(),
+    limit: String(params.limit),
+    offset: "0",
+  }).toString();
+  let response;
+  try {
+    response = await fetcher(url, {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${accessToken}`,
+        "X-AP-Context": `adAccountId=${accountId}`,
+      },
+      signal: AbortSignal.timeout(18000),
+    });
+  } catch {
+    throw new ProviderError("PROVIDER_UNREACHABLE", "Apple Ads could not be reached.", 503);
+  }
+  if (response.status === 429) {
+    throw new ProviderError("RATE_LIMITED", "Apple Ads is limiting requests. Wait before retrying.", 429);
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new ProviderError("APPLE_ADS_ACCESS", "Apple Ads credentials lack access to this ad account.", 503);
+  }
+  if (!response.ok) {
+    throw new ProviderError("PROVIDER_ERROR", `Apple Ads returned HTTP ${response.status}.`, 502);
+  }
+  const data = await response.json().catch(() => null);
+  if (!Array.isArray(data?.result)) {
+    throw new ProviderError("INVALID_RESPONSE", "Apple Ads returned an unexpected app-search response.");
+  }
+  const candidates = data.result
+    .filter((app) => Number.isSafeInteger(app?.adamId) && typeof app?.appName === "string")
+    .slice(0, params.limit)
+    .map((app) => ({
+      provider: "apple",
+      sourceId: String(app.adamId),
+      name: app.appName.slice(0, 300),
+      sourceUrl: `https://apps.apple.com/app/id${app.adamId}`,
+      publisher: typeof app.developerName === "string" ? app.developerName.slice(0, 300) : "",
+      description: "",
+      iconUrl: "",
+      metadata: {
+        bundleId: null,
+        version: null,
+        genre: null,
+        price: null,
+        currency: null,
+        releaseDate: null,
+        region: params.country.toUpperCase(),
+      },
+    }));
+  return {
+    provider: "apple",
+    dataMode: "live",
+    fetchedAt: new Date().toISOString(),
+    candidates,
+    sourceCount: data.result.length,
+    omittedCount: data.result.length - candidates.length,
+    country: params.country,
+    term: params.term,
+  };
+}
+
+export async function searchYouTube(params, fetcher = fetch) {
+  const key = process.env.YOUTUBE_API_KEY;
+  if (!key) {
+    throw new ProviderError("NOT_CONFIGURED", "YouTube API credentials are not configured on the server.", 503);
+  }
+  const url = new URL("https://www.googleapis.com/youtube/v3/search");
+  url.search = new URLSearchParams({
+    part: "snippet",
+    type: "channel",
+    q: params.term,
+    regionCode: params.country.toUpperCase(),
+    maxResults: String(Math.min(params.limit, 25)),
+    key,
+  }).toString();
+  let response;
+  try {
+    response = await fetcher(url, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    throw new ProviderError("PROVIDER_UNREACHABLE", "YouTube could not be reached.", 503);
+  }
+  if (response.status === 429) {
+    throw new ProviderError("RATE_LIMITED", "YouTube is limiting requests. Wait before retrying.", 429);
+  }
+  if (response.status === 403) {
+    throw new ProviderError("PROVIDER_ACCESS", "YouTube API quota or permissions are unavailable.", 503);
+  }
+  if (!response.ok) {
+    throw new ProviderError("PROVIDER_ERROR", `YouTube returned HTTP ${response.status}.`, 502);
+  }
+  const data = await response.json().catch(() => null);
+  if (!Array.isArray(data?.items)) {
+    throw new ProviderError("INVALID_RESPONSE", "YouTube returned an unexpected channel-search response.");
+  }
+  const candidates = data.items
+    .filter((item) => item?.id?.kind === "youtube#channel" && typeof item?.id?.channelId === "string" && typeof item?.snippet?.title === "string")
+    .slice(0, params.limit)
+    .map((item) => ({
+      provider: "youtube",
+      sourceId: item.id.channelId,
+      name: item.snippet.title.slice(0, 300),
+      sourceUrl: `https://www.youtube.com/channel/${encodeURIComponent(item.id.channelId)}`,
+      publisher: "",
+      description: typeof item.snippet.description === "string" ? item.snippet.description.slice(0, 12000) : "",
+      iconUrl: item.snippet.thumbnails?.default?.url || "",
+      metadata: {
+        bundleId: null,
+        version: null,
+        genre: "YouTube channel",
+        price: null,
+        currency: null,
+        releaseDate: item.snippet.publishedAt || null,
+        region: params.country.toUpperCase(),
+      },
+    }));
+  return {
+    provider: "youtube",
+    dataMode: "live",
+    fetchedAt: new Date().toISOString(),
+    candidates,
+    sourceCount: Array.isArray(data.items) ? data.items.length : 0,
+    omittedCount: data.items.length - candidates.length,
+    country: params.country,
+    term: params.term,
+  };
+}
 export const providerRegistry = {
   apple: {
     name: "Apple App Store",
-    search: searchApple,
-    requiresCredentials: false,
+    search: searchAppleAds,
+    requiresCredentials: true,
+  },
+  youtube: {
+    name: "YouTube",
+    search: searchYouTube,
+    requiresCredentials: true,
   },
 };
 

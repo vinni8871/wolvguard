@@ -3,7 +3,7 @@ import type { detect } from "@/lib/detection";
 export type ReviewStatus =
   "Needs Review" | "Under Review" | "Confirmed Impersonation" | "Dismissed";
 export type Asset = {
-  provider?: "apple" | "bluesky";
+  provider?: "apple" | "bluesky" | "youtube";
   id: string;
   name: string;
   sourceId: string;
@@ -23,7 +23,7 @@ export type LiveBrand = {
   createdAt: string;
 };
 export type ProviderCandidate = {
-  provider?: "apple" | "bluesky";
+  provider?: "apple" | "youtube" | "bluesky";
   imageSignature?: ImageSignature;
   imageError?: string;
   sourceId: string;
@@ -63,7 +63,7 @@ export type LiveCandidate = ProviderCandidate &
     }[];
   };
 export type Scan = {
-  provider?: "apple" | "bluesky";
+  provider?: "apple" | "youtube" | "bluesky";
   evidence?: LiveCandidate[];
   id: string;
   brandId: string;
@@ -106,7 +106,12 @@ export type ProviderStatus = {
     lastSuccess: string | null;
     lastError: string | null;
   };
-  youtube: { status: string };
+  youtube: {
+    status: string;
+    lastSuccess?: string | null;
+    lastError?: string | null;
+  };
+  assistant?: { status: string };
   auth: { status: string };
   email: { status: string };
 };
